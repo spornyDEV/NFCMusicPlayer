@@ -19,10 +19,13 @@ NFCMusicPlayer is an Arduino-based portable MP3 player that uses NFC tags to con
 The firmware is split across three Arduino (.ino) files that work together:
 
 ### NFCMusicPlayer.ino (main)
-- **setup()**: Initializes all hardware components in sequence (SD card, PN532, WiFi AP, webserver, audio library)
-- **loop()**: Continuously runs audio processing and monitors volume potentiometer
+- **setup()**: Configures pins (LEDs, navigation buttons, power control on GPIO 22 set HIGH), then initializes hardware in sequence: SD card, mappings, PN532 (incl. RF tuning for battery operation), WiFi AP, webserver, audio library, EQ settings from SD card, NFC task
+- **loop()**: Checks auto-shutdown timeout, runs `audio.loop()`, updates volume from the potentiometer, and polls the navigation buttons
 - **nfcTaskCode()**: Runs as FreeRTOS task, polls for NFC tags every 2 seconds, starts/stops playback based on tag presence
-- **Error signaling**: Uses STATUS_LED to indicate errors (1s blink = SD card failure, 200ms blink = PN532 failure)
+- **audio_eof_mp3()**: End-of-song callback, clears `playing` and the PLAY_LED
+- **loadSettings() / saveSettings()**: Read/write EQ settings (`/settings.json`) on the SD card
+- **checkNavigationButtons()**: Debounced forward/backward buttons that seek within the current song
+- **Error signaling**: Uses STATUS_LED to indicate errors (1s blink = SD card failure, 200ms blink = PN532 failure); STATUS_LED stays on once the player is ready
 
 ### MappingsFile.ino
 Handles persistent storage of NFC tag-to-song mappings:
@@ -33,6 +36,7 @@ Handles persistent storage of NFC tag-to-song mappings:
 ### Webserver.ino
 Provides REST API and web UI for configuration:
 - Serves static web UI files from `/web/` folder on SD card
+- Global middleware resets the auto-shutdown timer (`lastActivityTime`) on every HTTP request
 
 **REST API Endpoints:**
 - **GET /tagid**: Returns currently detected NFC tag UID
@@ -44,21 +48,26 @@ Provides REST API and web UI for configuration:
 - **POST /upload**: Handles chunked file upload for MP3 files
 - **POST /deletefile**: Deletes an MP3 file (checks if mapped first)
 - **POST /renamefile**: Renames an MP3 file (updates mappings automatically)
+- **GET /settings**: Returns EQ settings (`bass`, `mid`, `treble`)
+- **POST /settings**: Updates EQ settings (each clamped to -40..+6 dB), applies them via `audio.setTone()` and saves them to `/settings.json`
+
+Filenames passed to `/download`, `/deletefile` and `/renamefile` are rejected if they contain `..` or `/`.
 
 ### NFCMusicPlayer.h
 Central header file containing:
 - All `#include` statements for required libraries
-- Pin definitions for SPI buses, I2S audio, LEDs, and analog inputs
-- Configuration constants (intervals, file paths, WiFi credentials)
+- Pin definitions for SPI buses, I2S audio, LEDs, analog inputs, navigation buttons, and power control
+- Configuration constants (intervals, file paths, WiFi credentials, volume smoothing, shutdown timeout, button timing, seek steps)
 - Global objects (SPI, NFC, Audio, WebServer)
-- Global variables (playback state, tag ID, volume control)
+- Global variables (playback state, tag ID, volume control, activity timer, button debounce state, EQ values)
 - `mapping` struct definition and `List<mapping>` for tag storage
 
 ## File System Structure (SD Card)
 
 The SD card must contain:
 - `/mappings.txt` - NFC tag to song mappings (pipe-delimited: `AA:BB:CC:DD|songname.mp3`)
-- `/music/` - Directory containing MP3 files
+- `/settings.json` - EQ settings (`{"bass":0,"mid":0,"treble":0}`), created on first save; defaults to 0 dB if missing
+- `/music/` - Directory containing MP3 files (not included in `sdcard/` of this repo, must be created)
 - `/web/` - Web UI files:
   - `index.html` - Main web interface (Tailwind CSS dark theme)
   - `index.js` - JavaScript application logic
@@ -108,7 +117,7 @@ pio run --target clean
 ## Required Libraries
 
 PlatformIO automatically installs these dependencies from platformio.ini:
-- ESP32-audioI2S 2.0.0
+- ESP32-audioI2S 2.0.6 (from GitHub tag; README still lists 2.0.0)
 - Adafruit_PN532 1.3.4
 - AsyncTCP 3.4.0
 - ESP Async WebServer 3.7.7
@@ -126,16 +135,33 @@ No manual library installation required when using PlatformIO.
 - Tag UID stored as colon-separated hex string: "AA:BB:CC:DD"
 
 ### Volume Control
-- Uses analog potentiometer on GPIO 34
-- Averages 200 samples (VOLUME_SAMPLES) before updating
-- Maps 0-4095 ADC range to 0-20 volume steps
-- Continuous monitoring in main loop
+- Uses analog potentiometer on GPIO 34, read on every loop iteration
+- Smooths readings with an exponential moving average (VOLUME_SMOOTHING = 0.1)
+- Updates the volume at most every 50 ms (VOLUME_UPDATE_MS), only when the value changes
+- Logarithmic curve (exponent 2.5) maps the 0-4095 ADC range to volume 0-20
+- `audio.setVolumeSteps()` is not available in ESP32-audioI2S 2.0.6+, so the library's default step range is used
 
 ### Audio Playback
 - Uses ESP32-audioI2S library with I2S interface
 - Streams MP3 files directly from SD card
 - Callback `audio_eof_mp3()` handles end-of-song events
-- Song continues looping while NFC tag remains present
+- Song repeats while the NFC tag remains present: at song end `playing` is cleared, and the next NFC poll restarts it
+- Tone/EQ applied with `audio.setTone(bass, mid, treble)` at startup and on every `/settings` POST
+
+### Equalizer
+- Three bands: Bass, Mid, Treble, each -40 to +6 dB (UI labels: 500 Hz, 3 kHz, 6 kHz)
+- Stored in `/settings.json` on the SD card, loaded in `setup()`
+
+### Navigation Buttons
+- FORWARD_BTN (GPIO 16) seeks +30 s, BACKWARD_BTN (GPIO 17) seeks -10 s via `audio.setTimeOffset()`
+- Inputs use INPUT_PULLUP, active LOW
+- 50 ms debounce (DEBOUNCE_DELAY), at least 300 ms between triggers (REPEAT_DELAY)
+- Only active while a song is playing; each press resets the auto-shutdown timer
+
+### Auto-Shutdown
+- POWER_PIN (GPIO 22) is set HIGH in `setup()` to keep an external power circuit on
+- After 2 minutes (SHUTDOWN_TIMEOUT_MS) without activity and while not playing, POWER_PIN goes LOW so the external circuit cuts power
+- Activity = song playing, navigation button press, or any HTTP request (webserver middleware)
 
 ### WiFi Configuration
 - Always runs as Access Point (no station mode)
@@ -158,6 +184,12 @@ No manual library installation required when using PlatformIO.
 - **Vanilla JavaScript**: Toast notifications, file upload, table sorting
 
 ### UI Sections
+
+**Equalizer**
+- Three range sliders (Bass, Mid, Treble, -40 to +6 dB) with live dB display
+- Loads current values from `GET /settings` on page load
+- Saves automatically via `POST /settings` (300 ms debounce), confirms with a toast
+- "Reset (Flat)" button sets all bands to 0 dB
 
 **File Management**
 - Unified table showing all MP3 files with integrated NFC tag management
@@ -204,12 +236,12 @@ Replaces browser `alert()` dialogs with modern, non-intrusive notifications:
 - **Preview**: Streams file via `/download` endpoint to HTML5 Audio element
 
 ### Responsive Breakpoints
-- **Mobile (<640px)**: Single column, size/date columns hidden, larger touch targets
-- **Tablet (640-1024px)**: Size column visible, optimized spacing
-- **Desktop (>1024px)**: All columns visible, full feature set
+- **Below 768px**: Size and Upload Date columns hidden, EQ sliders stacked in one column
+- **768px and up (`md`)**: Size column visible, EQ sliders in three columns
+- **1024px and up (`lg`)**: Upload Date column visible as well
 
 ### State Management
-- **Current Sort**: `{ column: 'date', ascending: false }` (newest first)
+- **Current Sort**: initialized as `{ column: 'date', ascending: false }`. Note: `refreshFileList()` calls `sortTable(currentSort.column)`, which toggles the direction, so the first load shows oldest first and every refresh flips the order (see Known Issues)
 - **Current Audio**: Tracks playing preview, ensures only one plays at a time
 - File list refreshes after: upload, delete, rename, mapping changes
 
@@ -227,12 +259,30 @@ I2S audio pins:
 - BCLK: GPIO 26
 - LRC: GPIO 25
 
+Other pins:
+- PLAY_LED: GPIO 2 (on while playing)
+- STATUS_LED: GPIO 4 (error blink codes, on when ready)
+- VOLUME_PIN: GPIO 34 (potentiometer, ADC)
+- BATTERY_PIN: GPIO 35 (defined but not used yet)
+- POWER_PIN: GPIO 22 (power control for auto-shutdown)
+- FORWARD_BTN: GPIO 16, BACKWARD_BTN: GPIO 17 (navigation buttons)
+
 ## Hardware Constraints
 
 - Maximum 20 tag mappings (MAX_SLOTS)
 - MCP1826S regulator provides up to 1A at 3.3V
-- Brownout detector disabled in firmware to prevent spurious resets
+- Brownout detector stays enabled (protects the ESP32); the `soc/rtc_cntl_reg.h` include for disabling it is still in the header but unused
 - 18650 battery provides approximately 10 hours playback
+
+## Known Issues
+
+- `/songs` serializes into a fixed `StaticJsonDocument<2000>`; with many files or long filenames the list gets truncated
+- Upload area says "Drag and drop", but no drop handler is implemented; only click-to-browse works
+- Uploading a file with an existing name overwrites it without warning
+- File list sort direction flips on every `refreshFileList()` (see State Management)
+- `index.js` still contains empty leftover "Refresh songs dropdown" blocks (`$.getJSON("/songs", ...)` with empty loops); there is no dropdown anymore
+- `documentation/error-codes.md` has a heading only, no content
+- `BATTERY_PIN` is not read, so there is no battery level indication
 
 ## Common Modifications
 
@@ -254,5 +304,5 @@ When modifying the web UI:
 - **Colors**: Dark theme uses slate-* color palette (slate-900 background, slate-100 text)
 - **Responsive**: Use Tailwind breakpoints: sm (640px), md (768px), lg (1024px)
 - **User Feedback**: Always use `showToast()` instead of `alert()` for notifications
-- **File Operations**: Refresh file list and dropdowns after modifications
+- **File Operations**: Refresh the file list (`refreshFileList()`) after modifications
 - **Offline Requirement**: Never use CDN links - all assets must be local on SD card
