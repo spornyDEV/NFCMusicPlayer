@@ -227,7 +227,7 @@ function refreshFileList() {
 		});
 
 		// Apply current sort after loading
-		sortTable(currentSort.column);
+		sortTable(currentSort.column, false);
 	}).catch(function(error) {
 		console.error("Error loading file list:", error);
 		showToast("Error loading file list. Check console for details.", "error");
@@ -249,6 +249,64 @@ $("#file-input").on("change", function() {
 	} else {
 		$("#selected-files").addClass("hidden");
 	}
+});
+
+// Drag & drop: dropped MP3 files are put into the file input, then uploaded via the Upload button
+let dragCounter = 0;  // dragenter/dragleave also fire for child elements
+
+function setDropHighlight(active) {
+	$("#drop-zone")
+		.toggleClass("border-blue-500 bg-blue-500/20", active)
+		.toggleClass("border-slate-600", !active);
+}
+
+// Prevent the browser from opening files dropped outside the drop zone
+$(document).on("dragover drop", function(e) {
+	e.preventDefault();
+});
+
+$("#drop-zone").on("dragenter", function(e) {
+	e.preventDefault();
+	dragCounter++;
+	setDropHighlight(true);
+});
+
+$("#drop-zone").on("dragover", function(e) {
+	e.preventDefault();
+	e.originalEvent.dataTransfer.dropEffect = "copy";
+});
+
+$("#drop-zone").on("dragleave", function(e) {
+	dragCounter--;
+	if (dragCounter <= 0) {
+		dragCounter = 0;
+		setDropHighlight(false);
+	}
+});
+
+$("#drop-zone").on("drop", function(e) {
+	e.preventDefault();
+	e.stopPropagation();
+	dragCounter = 0;
+	setDropHighlight(false);
+
+	const dropped = Array.from(e.originalEvent.dataTransfer.files || []);
+	const mp3Files = dropped.filter(f => f.name.toLowerCase().endsWith('.mp3'));
+	const skipped = dropped.length - mp3Files.length;
+
+	if (mp3Files.length === 0) {
+		showToast("No MP3 files found. Only MP3 files can be uploaded.", "warning");
+		return;
+	}
+	if (skipped > 0) {
+		showToast(`${skipped} file(s) skipped: only MP3 files allowed`, "warning");
+	}
+
+	const dataTransfer = new DataTransfer();
+	mp3Files.forEach(f => dataTransfer.items.add(f));
+	const input = document.getElementById('file-input');
+	input.files = dataTransfer.files;
+	$(input).trigger("change");
 });
 
 function uploadFileSequentially(files, index) {
@@ -564,16 +622,19 @@ $(document).on("click", ".remove-mapping-btn", function() {
 
 // ==================== SORTING ====================
 
-function sortTable(column) {
+// toggle = true: header click (same column flips direction, new column starts ascending)
+// toggle = false: re-apply the current sort, e.g. after the file list was reloaded
+function sortTable(column, toggle = true) {
 	const tbody = $("#files-tbody");
 	const rows = tbody.find("tr").toArray();
 
-	// Toggle ascending/descending
-	if (currentSort.column === column) {
-		currentSort.ascending = !currentSort.ascending;
-	} else {
-		currentSort.column = column;
-		currentSort.ascending = true;
+	if (toggle) {
+		if (currentSort.column === column) {
+			currentSort.ascending = !currentSort.ascending;
+		} else {
+			currentSort.column = column;
+			currentSort.ascending = true;
+		}
 	}
 
 	rows.sort((a, b) => {

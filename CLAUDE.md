@@ -204,6 +204,9 @@ No manual library installation required when using PlatformIO.
     - Automatic duplicate tag detection
   - File actions: Download, Rename, Delete
 - **Upload Section**:
+  - Drop zone (`#drop-zone`): click to browse or drag & drop files; highlights while dragging (drag counter avoids flicker over child elements)
+  - Dropped files are filtered to `.mp3` (warning toast for skipped files), placed into `#file-input` via `DataTransfer`, and uploaded with the Upload button
+  - Files dropped outside the drop zone are ignored (no browser navigation)
   - Visual file selection feedback
   - Real-time progress bar with percentage
   - Sequential file upload for reliability
@@ -241,7 +244,7 @@ Replaces browser `alert()` dialogs with modern, non-intrusive notifications:
 - **1024px and up (`lg`)**: Upload Date column visible as well
 
 ### State Management
-- **Current Sort**: initialized as `{ column: 'date', ascending: false }`. Note: `refreshFileList()` calls `sortTable(currentSort.column)`, which toggles the direction, so the first load shows oldest first and every refresh flips the order (see Known Issues)
+- **Current Sort**: `{ column: 'date', ascending: false }` (newest first). Header clicks call `sortTable(column)` and toggle the direction; `refreshFileList()` calls `sortTable(column, false)` to re-apply the current sort without toggling
 - **Current Audio**: Tracks playing preview, ensures only one plays at a time
 - File list refreshes after: upload, delete, rename, mapping changes
 
@@ -277,9 +280,7 @@ Other pins:
 ## Known Issues
 
 - `/songs` serializes into a fixed `StaticJsonDocument<2000>`; with many files or long filenames the list gets truncated
-- Upload area says "Drag and drop", but no drop handler is implemented; only click-to-browse works
 - Uploading a file with an existing name overwrites it without warning
-- File list sort direction flips on every `refreshFileList()` (see State Management)
 - `index.js` still contains empty leftover "Refresh songs dropdown" blocks (`$.getJSON("/songs", ...)` with empty loops); there is no dropdown anymore
 - `documentation/error-codes.md` has a heading only, no content
 - `BATTERY_PIN` is not read, so there is no battery level indication
